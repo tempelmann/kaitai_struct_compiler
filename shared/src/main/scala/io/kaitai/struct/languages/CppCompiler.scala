@@ -30,7 +30,7 @@ class CppCompiler(
   override val translator = new CppTranslator(typeProvider, importListSrc)
   private val outSrcHeader = new StringLanguageOutputWriter(indent)
   private val outHdrHeader = new StringLanguageOutputWriter(indent)
-  private val outSrc = new StringLanguageOutputWriter(indent)
+  private var outSrc = new StringLanguageOutputWriter(indent)
   private val outHdr = new StringLanguageOutputWriter(indent)
 
   private class StringList {
@@ -38,12 +38,22 @@ class CppCompiler(
     def addUnique(s: String) = Utils.addUniqueAttr(list, s)
     def add(s: String) = list += s
     def toList: List[String] = list.toList
+    def clear() = list.clear()
   }
 
   // Collect public and private attributes:
   private var publicDecls = new StringList
   private var privateDecls = new StringList
   private val declsStack = new Stack[StringList]
+
+  // Remember our previous outSrc when redirecting it to a temporary writer
+  private var srcStack = new Stack[StringLanguageOutputWriter]
+
+  // Collect lines for constructor, as we output them later, in classFooter()
+  private var constructorPrefixWriter = () => {}
+
+  // Collect attributes that needs to be initalized in the constructor:
+  private var constructorInitializers = new StringList
 
   override def results(topClass: ClassSpec): Map[String, String] = {
     val fn = topClass.nameAsStr
@@ -128,6 +138,16 @@ class CppCompiler(
   }
 
   override def classFooter(name: List[String]): Unit = {
+
+    // Now we can finally output all the lines we temporarily collected since classConstructorHeader()
+    val prevSrc = outSrc
+    outSrc = srcStack.pop()
+
+    // But first we output the constructor:
+    //constructorPrefixWriter()
+
+    outSrc.add(prevSrc)
+
     outHdr.puts
     publicDecls.toList.foreach((line) => outHdr.puts(line))
     outHdr.puts
@@ -175,13 +195,31 @@ class CppCompiler(
       s"$tRoot $pRoot = 0$endianSuffixHdr);"
     )
 
+    //
     // prepare Constructor (.cpp)
-    outSrc.puts
-    outSrc.puts(s"${types2class(name)}::${types2class(List(name.last))}($paramsArg" +
-      s"$tIo $pIo, " +
-      s"$tParent $pParent, " +
-      s"$tRoot $pRoot$endianSuffixSrc) : $kstructName($pIo) {"
-    )
+    //
+
+    // We need to postpone writing the constructor to the output because we need to collect pointer members first,
+    // so that we can initialize them in the constructor. Therefore, we re-route outSrc to a temporary writer
+    // and write it out in classFooter()
+    srcStack.push(outSrc)
+    outSrc = new StringLanguageOutputWriter(indent)
+
+    // Prepare collection of all pointers we want to initialize
+    constructorInitializers.clear()
+    constructorInitializers.addUnique(s"$kstructName($pIo)")
+
+    //
+    constructorPrefixWriter = () => {
+      val initializers = constructorInitializers.toList.mkString(", ")
+      outSrc.puts
+      outSrc.puts(s"${types2class(name)}::${types2class(List(name.last))}($paramsArg" +
+        s"$tIo $pIo, " +
+        s"$tParent $pParent, " +
+        s"$tRoot $pRoot$endianSuffixSrc) : $initializers {"
+      )
+    }
+    constructorPrefixWriter()
     outSrc.inc
     handleAssignmentSimple(ParentIdentifier, pParent)
     handleAssignmentSimple(RootIdentifier, if (name == rootClassName) {
